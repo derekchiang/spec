@@ -29,6 +29,7 @@ An app's filesystem must be *rendered* in an empty directory by the following pr
 - The `rootfs` contained in the ACI is extracted
 - If the ACI contains a non-empty `dependencies` field in its `ImageManifest`, the `rootfs` of each dependent image is extracted, in the order in which they are listed
 - If the ACI contains a non-empty `pathWhitelist` field in its `ImageManifest`, *all* paths not in the whitelist must be removed
+- If the ACI contains a non-empty `pathBlacklist` field in its `ImageManifest`, *all* paths in the blacklist must be removed
 
 Every execution of an app MUST start from a clean copy of this rendered filesystem.
 
