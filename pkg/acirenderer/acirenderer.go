@@ -75,6 +75,54 @@ type ACIFiles struct {
 // RenderedACI is an (ordered) slice of ACIFiles
 type RenderedACI []*ACIFiles
 
+// plToMap converts a pathWhiteList or a pathBlackList slice to a map for
+// faster search.
+// It will also prepend "rootfs/" to the provided paths and they will be
+// relative to "/" so they can be easily compared with the tar.Header.Name
+// If pwl length is 0, a nil map is returned
+func plToMap(pl []string) map[string]struct{} {
+	if len(pl) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(pl))
+	for _, name := range pl {
+		relpath := filepath.Join("rootfs", name)
+		m[relpath] = struct{}{}
+	}
+	return m
+}
+
+// pathExcluder is used to decide whether a path should be excluded from
+// a rendered ACI, given a ImageManifest which may or may not specify either
+// a path whitelist or a path blacklist.
+type pathExcluder struct {
+	// We use maps instead of slices for faster lookup
+	pathWhitelistMap map[string]struct{}
+	pathBlacklistMap map[string]struct{}
+}
+
+// newPathExcluder creates a new pathExcluder given an image manifest
+func newPathExcluder(manifest *schema.ImageManifest) *pathExcluder {
+	return &pathExcluder{
+		pathWhitelistMap: plToMap(manifest.PathWhitelist),
+		pathBlacklistMap: plToMap(manifest.PathBlacklist),
+	}
+}
+
+// shouldExclude determines whether a given path should be excluded
+func (p *pathExcluder) shouldExclude(path string) bool {
+	if p.pathWhitelistMap != nil {
+		_, inWhitelist := p.pathWhitelistMap[path]
+		return !inWhitelist
+	}
+	if p.pathBlacklistMap != nil {
+		_, inBlacklist := p.pathBlacklistMap[path]
+		return inBlacklist
+	}
+	// If there is no list, then everything should be included
+	return false
+}
+
 // GetRenderedACIWithImageID, given an imageID, starts with the matching image
 // available in the store, creates the dependencies list and returns the
 // RenderedACI list.
@@ -109,8 +157,8 @@ func GetRenderedACIFromList(imgs Images, ap ACIProvider) (RenderedACI, error) {
 
 	first := true
 	for i, img := range imgs {
-		pwlm := getUpperPWLM(imgs, i)
-		ra, err := getACIFiles(img, ap, allFiles, pwlm)
+		pe := getUpperPathExcluder(imgs, i)
+		ra, err := getACIFiles(img, ap, allFiles, pe)
 		if err != nil {
 			return nil, err
 		}
@@ -125,25 +173,25 @@ func GetRenderedACIFromList(imgs Images, ap ACIProvider) (RenderedACI, error) {
 	return renderedACI, nil
 }
 
-// getUpperPWLM returns the pwl at the lower level for the branch where
-// img[pos] lives.
-func getUpperPWLM(imgs Images, pos int) map[string]struct{} {
-	var pwlm map[string]struct{}
+// getUpperPathExcluder returns the pathExcluder at the lower level for the
+// branch where img[pos] lives.
+func getUpperPathExcluder(imgs Images, pos int) *pathExcluder {
+	pe := newPathExcluder(&schema.ImageManifest{})
 	curlevel := imgs[pos].Level
 	// Start from our position and go back ignoring the other leafs.
 	for i := pos; i >= 0; i-- {
 		img := imgs[i]
-		if img.Level < curlevel && len(img.Im.PathWhitelist) > 0 {
-			pwlm = pwlToMap(img.Im.PathWhitelist)
+		if img.Level < curlevel && (len(img.Im.PathWhitelist) > 0 || len(img.Im.PathBlacklist) > 0) {
+			pe = newPathExcluder(img.Im)
 		}
 		curlevel = img.Level
 	}
-	return pwlm
+	return pe
 }
 
 // getACIFiles returns the ACIFiles struct for the given image. All files
 // outside rootfs are excluded (at the moment only "manifest").
-func getACIFiles(img Image, ap ACIProvider, allFiles map[string]byte, pwlm map[string]struct{}) (*ACIFiles, error) {
+func getACIFiles(img Image, ap ACIProvider, allFiles map[string]byte, pe *pathExcluder) (*ACIFiles, error) {
 	rs, err := ap.ReadStream(img.Key)
 	if err != nil {
 		return nil, err
@@ -153,7 +201,7 @@ func getACIFiles(img Image, ap ACIProvider, allFiles map[string]byte, pwlm map[s
 	hash := sha512.New()
 	r := io.TeeReader(rs, hash)
 
-	thispwlm := pwlToMap(img.Im.PathWhitelist)
+	thisPathExcluder := newPathExcluder(img.Im)
 	ra := &ACIFiles{FileMap: make(map[string]struct{})}
 	if err = Walk(tar.NewReader(r), func(hdr *tar.Header) error {
 		name := hdr.Name
@@ -173,18 +221,14 @@ func getACIFiles(img Image, ap ACIProvider, allFiles map[string]byte, pwlm map[s
 
 		// Is the file in our PathWhiteList?
 		// If the file is a directory continue also if not in PathWhiteList
-		if hdr.Typeflag != tar.TypeDir {
-			if len(img.Im.PathWhitelist) > 0 {
-				if _, ok := thispwlm[cleanName]; !ok {
-					return nil
-				}
-			}
+		// or if in PathBlacklist
+		if hdr.Typeflag != tar.TypeDir && thisPathExcluder.shouldExclude(cleanName) {
+			return nil
 		}
-		// Is the file in the lower level PathWhiteList of this img branch?
-		if pwlm != nil {
-			if _, ok := pwlm[cleanName]; !ok {
-				return nil
-			}
+		// Is the file in the lower level PathWhiteList/PathBlackList of this
+		// img branch?
+		if pe.shouldExclude(cleanName) {
+			return nil
 		}
 		// Is the file already provided by a previous image?
 		if _, ok := allFiles[cleanName]; ok {
@@ -217,22 +261,6 @@ func getACIFiles(img Image, ap ACIProvider, allFiles map[string]byte, pwlm map[s
 
 	ra.Key = img.Key
 	return ra, nil
-}
-
-// pwlToMap converts a pathWhiteList slice to a map for faster search
-// It will also prepend "rootfs/" to the provided paths and they will be
-// relative to "/" so they can be easily compared with the tar.Header.Name
-// If pwl length is 0, a nil map is returned
-func pwlToMap(pwl []string) map[string]struct{} {
-	if len(pwl) == 0 {
-		return nil
-	}
-	m := make(map[string]struct{}, len(pwl))
-	for _, name := range pwl {
-		relpath := filepath.Join("rootfs", name)
-		m[relpath] = struct{}{}
-	}
-	return m
 }
 
 func Walk(tarReader *tar.Reader, walkFunc func(hdr *tar.Header) error) error {

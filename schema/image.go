@@ -35,6 +35,7 @@ type ImageManifest struct {
 	Annotations   types.Annotations  `json:"annotations,omitempty"`
 	Dependencies  types.Dependencies `json:"dependencies,omitempty"`
 	PathWhitelist []string           `json:"pathWhitelist,omitempty"`
+	PathBlacklist []string           `json:"pathBlacklist,omitempty"`
 }
 
 // imageManifest is a model to facilitate extra validation during the
@@ -82,6 +83,9 @@ func (im *ImageManifest) assertValid() error {
 	}
 	if im.Name.Empty() {
 		return errors.New(`name must be set`)
+	}
+	if len(im.PathWhitelist) > 0 && len(im.PathBlacklist) > 0 {
+		return errors.New(`pathWhitelist and pathBlacklist cannot both be non-empty`)
 	}
 	return nil
 }

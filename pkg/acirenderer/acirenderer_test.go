@@ -110,7 +110,7 @@ func addDependencies(imj string, deps ...types.Dependency) (string, error) {
 	return string(imjb), err
 }
 
-func genSimpleImage(imj string, pwl []string, level uint16, dir string, ds *TestStore) (*Image, error) {
+func genSimpleImage(imj string, pwl []string, pbl []string, level uint16, dir string, ds *TestStore) (*Image, error) {
 	entries := []*testTarEntry{
 		{
 			contents: imj,
@@ -129,12 +129,13 @@ func genSimpleImage(imj string, pwl []string, level uint16, dir string, ds *Test
 		return nil, fmt.Errorf("unexpected error: %v", err)
 	}
 	im.PathWhitelist = pwl
+	im.PathBlacklist = pbl
 	image1 := &Image{Im: im, Key: key, Level: level}
 	return image1, nil
 
 }
 
-func TestGetUpperPWLM(t *testing.T) {
+func TestGetUpperPathExcluder(t *testing.T) {
 	dir, err := ioutil.TempDir("", tstprefix)
 	if err != nil {
 		t.Fatalf("error creating tempdir: %v", err)
@@ -151,61 +152,63 @@ func TestGetUpperPWLM(t *testing.T) {
 	`
 
 	l0pwl1 := []string{"/a/path/white/list/level0/1"}
-	l1pwl1 := []string{"/a/path/white/list/level1/1"}
+	l1pbl1 := []string{"/a/path/black/list/level1/1"}
 
-	l0pwl1m := pwlToMap(l0pwl1)
+	l0pe := newPathExcluder(&schema.ImageManifest{
+		PathWhitelist: l0pwl1,
+	})
 
 	// An image at level 0 with l0pwl1
-	iml0pwl1, err := genSimpleImage(imj, l0pwl1, 0, dir, ds)
+	iml0pwl1, err := genSimpleImage(imj, l0pwl1, []string{}, 0, dir, ds)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// An image at level 0 without pwl
-	iml0nopwl, err := genSimpleImage(imj, []string{}, 0, dir, ds)
+	iml0nopwl, err := genSimpleImage(imj, []string{}, []string{}, 0, dir, ds)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// An image at level 1 with l1pwl1
-	iml1pwl1, err := genSimpleImage(imj, l1pwl1, 1, dir, ds)
+	// An image at level 1 with l1pbl1
+	iml1pbl1, err := genSimpleImage(imj, []string{}, l1pbl1, 1, dir, ds)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// An image at level 1 without pwl
-	iml1nopwl, err := genSimpleImage(imj, []string{}, 0, dir, ds)
+	// An image at level 1 without pbl
+	iml1nopbl, err := genSimpleImage(imj, []string{}, []string{}, 0, dir, ds)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// An image at level 2 without pwl
-	iml2nopwl, err := genSimpleImage(imj, []string{}, 2, dir, ds)
+	iml2nopwl, err := genSimpleImage(imj, []string{}, []string{}, 2, dir, ds)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var emptypwlm map[string]struct{}
+	emptyPe := newPathExcluder(&schema.ImageManifest{})
 
 	// A (pwl)
-	// Searching for the upper pwlm of A should return nil
+	// Searching for the upper path excluder of A should return nil
 	A := *iml0pwl1
 	images := Images{A}
-	pwlm := getUpperPWLM(images, 0)
-	if !reflect.DeepEqual(pwlm, emptypwlm) {
-		t.Errorf("wrong PathWhitelist, got %#v, want: %#v", pwlm, emptypwlm)
+	pe := getUpperPathExcluder(images, 0)
+	if !reflect.DeepEqual(pe, emptyPe) {
+		t.Errorf("wrong PathExcluder, got %#v, want: %#v", pe, emptyPe)
 
 	}
 
 	// A (pwl) ---- B (pwl) --- C
-	// Searching for the upper pwlm of C should return l0pwl1m
+	// Searching for the upper path excluder of C should return l0pe
 	A = *iml0pwl1
-	B := *iml1pwl1
+	B := *iml1pbl1
 	C := *iml2nopwl
 	images = Images{A, B, C}
-	pwlm = getUpperPWLM(images, 2)
-	if !reflect.DeepEqual(pwlm, l0pwl1m) {
-		t.Errorf("wrong PathWhitelist, got %#v, want: %#v", pwlm, l0pwl1m)
+	pe = getUpperPathExcluder(images, 2)
+	if !reflect.DeepEqual(pe, l0pe) {
+		t.Errorf("wrong PathExcluder, got %#v, want: %#v", pe, l0pe)
 
 	}
 
@@ -213,13 +216,13 @@ func TestGetUpperPWLM(t *testing.T) {
 	//    \-- C (pwl)
 	// Searching for the upper pwlm of C should return nil
 	A = *iml0nopwl
-	B = *iml1nopwl
-	C = *iml1pwl1
+	B = *iml1nopbl
+	C = *iml1pbl1
 	D := *iml2nopwl
 	images = Images{A, C, B, D}
-	pwlm = getUpperPWLM(images, 3)
-	if !reflect.DeepEqual(pwlm, emptypwlm) {
-		t.Errorf("wrong PathWhitelist, got %#v, want: %#v", pwlm, emptypwlm)
+	pe = getUpperPathExcluder(images, 3)
+	if !reflect.DeepEqual(pe, emptyPe) {
+		t.Errorf("wrong PathExcluder, got %#v, want: %#v", pe, emptyPe)
 	}
 }
 
