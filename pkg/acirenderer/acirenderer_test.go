@@ -927,6 +927,186 @@ func TestFileOvverideDir(t *testing.T) {
 	}
 }
 
+// Test an image with 1 dep. The parent image has a pathBlacklist.
+func TestPBLOnlyParent(t *testing.T) {
+	dir, err := ioutil.TempDir("", tstprefix)
+	if err != nil {
+		t.Fatalf("error creating tempdir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	ds := NewTestStore()
+
+	imj := `
+		{
+		    "acKind": "ImageManifest",
+		    "acVersion": "0.1.1",
+		    "name": "example.com/test01",
+		    "pathBlacklist" : [ "/a/file01.txt", "/a/file02.txt", "/b/link01.txt", "/c/", "/d/" ]
+		}
+	`
+
+	entries := []*testTarEntry{
+		{
+			contents: imj,
+			header: &tar.Header{
+				Name: "manifest",
+				Size: int64(len(imj)),
+			},
+		},
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/a/file01.txt",
+				Size: 5,
+			},
+		},
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/a/file02.txt",
+				Size: 5,
+			},
+		},
+		// This should not appear in rendered aci
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/a/file03.txt",
+				Size: 5,
+			},
+		},
+		{
+			header: &tar.Header{
+				Name:     "rootfs/b/link01.txt",
+				Linkname: "file01.txt",
+				Typeflag: tar.TypeSymlink,
+			},
+		},
+		// The file "rootfs/c/file01.txt" should not appear but a new file "rootfs/c/file02.txt" provided by the upper image should appear.
+		// The directory should be left with its permissions
+		{
+			header: &tar.Header{
+				Name:     "rootfs/c",
+				Typeflag: tar.TypeDir,
+				Mode:     0700,
+			},
+		},
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/c/file01.txt",
+				Size: 5,
+				Mode: 0700,
+			},
+		},
+		// The file "rootfs/d/file01.txt" should not appear but the directory should be left and also its permissions
+		{
+			header: &tar.Header{
+				Name:     "rootfs/d",
+				Typeflag: tar.TypeDir,
+				Mode:     0700,
+			},
+		},
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/d/file01.txt",
+				Size: 5,
+				Mode: 0700,
+			},
+		},
+		// The file and the directory should not appear
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/e/file01.txt",
+				Size: 5,
+				Mode: 0700,
+			},
+		},
+	}
+
+	key1, err := newTestACI(entries, dir, ds)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	im, err := createImageManifest(imj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	image1 := Image{Im: im, Key: key1, Level: 1}
+
+	imj = `
+		{
+		    "acKind": "ImageManifest",
+		    "acVersion": "0.1.1",
+		    "name": "example.com/test02"
+		}
+	`
+
+	k1, _ := types.NewHash(key1)
+	imj, err = addDependencies(imj,
+		types.Dependency{
+			ImageName: "example.com/test01",
+			ImageID:   k1},
+	)
+
+	entries = []*testTarEntry{
+		{
+			contents: imj,
+			header: &tar.Header{
+				Name: "manifest",
+				Size: int64(len(imj)),
+			},
+		},
+		{
+			contents: "hellohello",
+			header: &tar.Header{
+				Name: "rootfs/b/file01.txt",
+				Size: 10,
+			},
+		},
+		// New file
+		{
+			contents: "hello",
+			header: &tar.Header{
+				Name: "rootfs/c/file02.txt",
+				Size: 5,
+			},
+		},
+	}
+
+	expectedFiles := []*fileInfo{
+		&fileInfo{path: "manifest", typeflag: tar.TypeReg},
+		&fileInfo{path: "rootfs/a/file03.txt", typeflag: tar.TypeReg, size: 5},
+		&fileInfo{path: "rootfs/b/file01.txt", typeflag: tar.TypeReg, size: 10},
+		&fileInfo{path: "rootfs/c", typeflag: tar.TypeDir, mode: 0700},
+		&fileInfo{path: "rootfs/c/file01.txt", typeflag: tar.TypeReg, size: 5},
+		&fileInfo{path: "rootfs/c/file02.txt", typeflag: tar.TypeReg, size: 5},
+		&fileInfo{path: "rootfs/e/file01.txt", typeflag: tar.TypeReg, size: 5},
+	}
+
+	key2, err := newTestACI(entries, dir, ds)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	im, err = createImageManifest(imj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	image2 := Image{Im: im, Key: key2, Level: 0}
+
+	images := Images{image2, image1}
+	err = checkRenderACIFromList(images, expectedFiles, ds)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	err = checkRenderACI("example.com/test02", expectedFiles, ds)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // Test an image with 1 dep. The parent image has a pathWhiteList.
 func TestPWLOnlyParent(t *testing.T) {
 	dir, err := ioutil.TempDir("", tstprefix)

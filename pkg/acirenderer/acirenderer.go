@@ -26,6 +26,8 @@ import (
 
 	"github.com/appc/spec/schema"
 	"github.com/appc/spec/schema/types"
+
+	"github.com/tchap/go-patricia/patricia"
 )
 
 // An ACIRegistry provides all functions of an ACIProvider plus functions to
@@ -96,17 +98,26 @@ func plToMap(pl []string) map[string]struct{} {
 // a rendered ACI, given a ImageManifest which may or may not specify either
 // a path whitelist or a path blacklist.
 type pathExcluder struct {
-	// We use maps instead of slices for faster lookup
+	// We use a map to look up paths in the whitelist
 	pathWhitelistMap map[string]struct{}
-	pathBlacklistMap map[string]struct{}
+
+	// Blacklist needs to be a trie because if some prefix of a path is in the
+	// blacklist, the path should be excluded.
+	pathBlacklistTrie *patricia.Trie
 }
 
 // newPathExcluder creates a new pathExcluder given an image manifest
 func newPathExcluder(manifest *schema.ImageManifest) *pathExcluder {
-	return &pathExcluder{
+	pe := &pathExcluder{
 		pathWhitelistMap: plToMap(manifest.PathWhitelist),
-		pathBlacklistMap: plToMap(manifest.PathBlacklist),
 	}
+	if len(manifest.PathBlacklist) > 0 {
+		pe.pathBlacklistTrie = patricia.NewTrie()
+		for _, path := range manifest.PathBlacklist {
+			pe.pathBlacklistTrie.Insert(patricia.Prefix(path), struct{}{})
+		}
+	}
+	return pe
 }
 
 // shouldExclude determines whether a given path should be excluded
@@ -115,8 +126,13 @@ func (p *pathExcluder) shouldExclude(path string) bool {
 		_, inWhitelist := p.pathWhitelistMap[path]
 		return !inWhitelist
 	}
-	if p.pathBlacklistMap != nil {
-		_, inBlacklist := p.pathBlacklistMap[path]
+	if p.pathBlacklistTrie != nil {
+		var inBlacklist bool
+		p.pathBlacklistTrie.VisitPrefixes(patricia.Prefix(path),
+			func(prefix patricia.Prefix, item patricia.Item) error {
+				inBlacklist = true
+				return fmt.Errorf("Not an error; just forcing VisitPrefixes to exit early")
+			})
 		return inBlacklist
 	}
 	// If there is no list, then everything should be included
